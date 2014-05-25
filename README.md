@@ -1,5 +1,5 @@
-vega_Whatsapp
-=============
+Vega
+====
 
 Proyecto para Universidad Galileo
 
