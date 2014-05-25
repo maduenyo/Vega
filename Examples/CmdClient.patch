@@ -1,0 +1,151 @@
+--- CmdClient.py	2013-11-30 18:49:13.113790787 +0100
++++ CmdClientPatched.py	2013-11-30 19:39:41.493857493 +0100
+@@ -20,7 +20,7 @@
+ '''
+ from Yowsup.connectionmanager import YowsupConnectionManager
+ import time, datetime, sys
+-
++import os.path
+ 
+ if sys.version_info >= (3, 0):
+ 	raw_input = input
+@@ -31,6 +31,7 @@
+ 		self.sendReceipts = sendReceipts
+ 		self.phoneNumber = phoneNumber
+ 		self.jid = "%s@s.whatsapp.net" % phoneNumber
++		self.myjid=""
+ 		
+ 		self.sentCache = {}
+ 		
+@@ -45,28 +46,68 @@
+ 		self.signalsInterface.registerListener("receipt_messageSent", self.onMessageSent)
+ 		self.signalsInterface.registerListener("presence_updated", self.onPresenceUpdated)
+ 		self.signalsInterface.registerListener("disconnected", self.onDisconnected)
+-		
+-		
+-		self.commandMappings = {"lastseen":lambda: self.methodsInterface.call("presence_request", ( self.jid,)),
+-								"available": lambda: self.methodsInterface.call("presence_sendAvailable"),
+-								"unavailable": lambda: self.methodsInterface.call("presence_sendUnavailable")
++		self.signalsInterface.registerListener("profile_setPictureSuccess",self.onPictureSuccess)
++		self.signalsInterface.registerListener("profile_setPictureError",self.onPictureError)
++		self.signalsInterface.registerListener("contact_gotProfilePicture",self.onProfilePicture),
++		self.signalsInterface.registerListener("profile_setStatusSuccess",self.onStatusSuccess)
++		
++		#	0: method, 1: parameter name in prompt, 2: position in prompt  
++		
++		self.commandMappings = {"lastseen":    (lambda: self.methodsInterface.call("presence_request", (self.jid,)),"",6),
++								"available":   (lambda: self.methodsInterface.call("presence_sendAvailable"),"",1),
++								"unavailable": (lambda: self.methodsInterface.call("presence_sendUnavailable"),"",2),
++								"setprofile":  (lambda file: self.setProfile(file,),"filename",4),
++								"setstatus":   (lambda status: self.setStatus(status,),"status",5),
++								"getprofile":  (lambda: self.methodsInterface.call("contact_getProfilePicture", (self.jid,)),"",3),
++								"exit": 	   (self.done,"",7)
+ 								 }
+ 		
++				
+ 		self.done = False
+-		#signalsInterface.registerListener("receipt_messageDelivered", lambda jid, messageId: methodsInterface.call("delivered_ack", (jid, messageId)))
++		#self.signalsInterface.registerListener("receipt_messageDelivered", lambda jid, messageId: self.methodsInterface.call("delivered_ack", (jid, messageId)))
+ 	
+ 	def login(self, username, password):
+ 		self.username = username
++		self.myjid = "%s@s.whatsapp.net" % username
+ 		self.methodsInterface.call("auth_login", (username, password))
+ 
+ 		while not self.done:
+ 			time.sleep(0.5)
+ 
++	def done(self):
++		self.done = True
++
+ 	def onAuthSuccess(self, username):
+ 		print("Authed %s" % username)
+ 		self.methodsInterface.call("ready")
+ 		self.goInteractive(self.phoneNumber)
+ 
++	def setProfile(self,file):
++		if os.path.isfile(file):
++			self.methodsInterface.call("profile_setPicture", (file,))
++		else:
++			print "??? Unable to locate file %s" % (file)
++			
++	def onPictureSuccess(self, id):
++		print("Set picture succeeded: %d" % id)
++
++	def onPictureError(self, error):
++		print("Set picture error occured")
++
++	def onProfilePicture(self, jid, pictureid, path):
++		print("Got profile picture of %s: id: %s path:%s" % (jid, pictureid, path))
++
++	def setStatus(self, status):
++		print "Setting status to '%s'" % (status)
++		self.methodsInterface.call("profile_setStatus", (status,)),
++
++	def onStatusSuccess(self, jid, messageId):
++		print("Set status success %s %s" % (jid,messageId))
++#		self.methodsInterface.call("message_send", (jid, "Status set"))
++		self.methodsInterface.call("message_ack", (jid, messageId))
++#		self.methodsInterface.call("delivered_ack", (jid, messageId))
++#		self.methodsInterface.call("notification_ack", (jid, messageId))
++					  							
+ 	def onAuthFailed(self, username, err):
+ 		print("Auth Failed!")
+ 
+@@ -78,17 +119,21 @@
+ 		self.onMessageReceived(0, jid, "LAST SEEN RESULT: %s"%formattedDate, long(time.time()), False, None, False)
+ 
+ 	def onMessageSent(self, jid, messageId):
+-		formattedDate = datetime.datetime.fromtimestamp(self.sentCache[messageId][0]).strftime('%d-%m-%Y %H:%M')
+-		print("%s [%s]:%s"%(self.username, formattedDate, self.sentCache[messageId][1]))
++		if messageId in self.sentCache:
++			formattedDate = datetime.datetime.fromtimestamp(self.sentCache[messageId][0]).strftime('%d-%m-%Y %H:%M')
++			print("%s [%s]:%s"%(self.username, formattedDate, self.sentCache[messageId][1]))
+ 		print(self.getPrompt())
+ 
+-	def runCommand(self, command):
++	def runCommand(self, command, parm=None):
+ 		if command[0] == "/":
+ 			command = command[1:].split(' ')
+ 			try:
+-				self.commandMappings[command[0]]()
++				if parm:
++					self.commandMappings[command[0]][0](parm)
++				else:
++					self.commandMappings[command[0]][0]()
+ 				return 1
+-			except KeyError:
++			except (KeyError, TypeError) as e:
+ 				return 0
+ 		
+ 		return 0
+@@ -108,14 +153,24 @@
+ 		print("Starting Interactive chat with %s" % jid)
+ 		jid = "%s@s.whatsapp.net" % jid
+ 		print(self.getPrompt())
+-		while True:
++		while not self.done:
+ 			message = raw_input()
+ 			message = message.strip()
+ 			if not len(message):
+ 				continue
+-			if not self.runCommand(message.strip()):
++			parm=None
++			if message[0] == "/":
++				parm=' '.join(message.split(' ')[1:])
++				if parm:
++					commandExecuted=self.runCommand(message.strip(),parm)
++				else:
++					commandExecuted=self.runCommand(message.strip())
++				if not commandExecuted:
++					print "Failed to execute %s" % (message)
++			else:
+ 				msgId = self.methodsInterface.call("message_send", (jid, message))
+ 				self.sentCache[msgId] = [int(time.time()), message]
+-		self.done = True
++	
+ 	def getPrompt(self):
+-		return "Enter Message or command: (/%s)" % ", /".join(self.commandMappings)
++		message=[ "%s%s%s" % (i," " if self.commandMappings[i][1] else "", self.commandMappings[i][1]) for i in sorted(self.commandMappings, lambda x,y: cmp(x,y), lambda x: self.commandMappings[x][2])]																							
++		return "Enter Message or command: (/%s)" % ", /".join(message).replace(" ,",",")
+\ No newline at end of file
